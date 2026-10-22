@@ -14,10 +14,10 @@ log = logging.getLogger("uvicorn.error")
 DONE = None  # sent after a job's last token
 STOP = object()  # queued by Batcher.stop() behind the remaining jobs
 
-TOKENS = Counter("generated_tokens", "Tokens generated")
-BATCH_SIZE = Histogram("batch_size", "Requests generated together", buckets=(1, 2, 4, 8, 16, 32))
-TOKENS_PER_SEC = Gauge("tokens_per_second", "Throughput of the most recent batch")
-QUEUE_DEPTH = Gauge("queue_depth", "Requests waiting for a batch")
+TOKENS = Counter("generated_tokens", "Tokens generated", ["model"])
+BATCH_SIZE = Histogram("batch_size", "Requests generated together", ["model"], buckets=(1, 2, 4, 8, 16, 32))
+TOKENS_PER_SEC = Gauge("tokens_per_second", "Throughput of the most recent batch", ["model"])
+QUEUE_DEPTH = Gauge("queue_depth", "Requests waiting for a batch", ["model"])
 
 
 @dataclass
@@ -47,16 +47,17 @@ class Batcher:
 
     Requests wait in a bounded queue. The worker takes the first one, waits up to max_wait_ms for more
     (up to max_batch), then generates for all of them together. max_batch=1 turns batching off.
+    One Batcher per model: only requests for the same model can share a batch.
     """
 
     # ponytail: requests that arrive mid-batch wait for the whole batch to finish; continuous batching
     # (admitting new rows into a running batch) is the upgrade if long generations starve short ones
 
-    def __init__(self, model, max_batch, max_wait_ms, max_queue):
-        self.model, self.max_batch, self.max_wait = model, max_batch, max_wait_ms / 1000
+    def __init__(self, model, max_batch, max_wait_ms, max_queue, name):
+        self.model, self.max_batch, self.max_wait, self.name = model, max_batch, max_wait_ms / 1000, name
         self.q = queue.Queue(max_queue)
-        self.thread = threading.Thread(target=self._loop, name="batcher", daemon=True)
-        QUEUE_DEPTH.set_function(self.q.qsize)
+        self.thread = threading.Thread(target=self._loop, name=f"batcher-{name}", daemon=True)
+        QUEUE_DEPTH.labels(name).set_function(self.q.qsize)
 
     def start(self):
         self.thread.start()
@@ -96,7 +97,7 @@ class Batcher:
                 self._run(batch)
 
     def _run(self, batch):
-        BATCH_SIZE.observe(len(batch))
+        BATCH_SIZE.labels(self.name).observe(len(batch))
         start, n = time.perf_counter(), 0
         try:
             for i, tok, done in generate_batch(
@@ -115,5 +116,5 @@ class Batcher:
             for j in batch:
                 j.emit(e)  # every waiting request gets the error instead of hanging
             return
-        TOKENS.inc(n)
-        TOKENS_PER_SEC.set(n / (time.perf_counter() - start))
+        TOKENS.labels(self.name).inc(n)
+        TOKENS_PER_SEC.labels(self.name).set(n / (time.perf_counter() - start))

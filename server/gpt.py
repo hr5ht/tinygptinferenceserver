@@ -7,8 +7,7 @@ import urllib.request
 from dataclasses import dataclass
 
 import numpy as np
-
-HF_REPO = "hr5ht/tinygpt-shakespeare"
+from tokenizers import Tokenizer as WordPieces
 
 # the training text had curly quotes turned into straight ones, so prompts get the same treatment
 QUOTES = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"'})
@@ -48,8 +47,9 @@ def gelu(x):
 
 
 class GPT:
-    def __init__(self, cfg, w):
+    def __init__(self, cfg, w, eot=None):
         self.cfg, self.w = cfg, w
+        self.eot = eot  # token that ends a document (v2); generation stops there
 
     def _attn(self, x, p, cache, key_mask):
         w, B, T, C = self.w, *x.shape
@@ -93,6 +93,10 @@ class GPT:
 
 
 class Tokenizer:
+    """v1: one token per character, 97 of them."""
+
+    eot = None
+
     def __init__(self, chars):
         self.chars = chars
         self.stoi = {c: i for i, c in enumerate(chars)}
@@ -108,17 +112,35 @@ class Tokenizer:
         return "".join(self.chars[i] for i in ids)
 
 
-def load(repo=HF_REPO):
-    """Download shakespeare.npz (made by convert.py) from the Hugging Face Hub once, then rebuild model + tokenizer.
-    Cached in the temp dir, the only writable place on Vercel."""
+class BPETokenizer:
+    """v2: 4096 byte-level word pieces, from the tokenizer.json stored in the npz by model/stories.ipynb."""
+
+    def __init__(self, spec):
+        self.t = WordPieces.from_str(spec)
+        self.eot = self.t.token_to_id("<|endoftext|>")
+
+    def unknown(self, s):
+        return []  # byte-level: any text can be encoded
+
+    def encode(self, s):
+        return self.t.encode(s.translate(QUOTES)).ids
+
+    def decode(self, ids):
+        return self.t.decode(ids)
+
+
+def load(repo, filename):
+    """Download the npz (v1: made by convert.py, v2: by model/stories.ipynb) from the Hugging Face Hub once,
+    then rebuild model + tokenizer. Cached in the temp dir, the only writable place on Vercel."""
     path = os.path.join(tempfile.gettempdir(), repo.replace("/", "--") + ".npz")
     if not os.path.exists(path):
-        urllib.request.urlretrieve(f"https://huggingface.co/{repo}/resolve/main/shakespeare.npz", path + ".part")
+        urllib.request.urlretrieve(f"https://huggingface.co/{repo}/resolve/main/{filename}", path + ".part")
         os.replace(path + ".part", path)
     with np.load(path) as f:
         w = {k: f[k] for k in f.files}
     cfg = GPTConfig(**json.loads(str(w.pop("config"))))
-    return GPT(cfg, w), Tokenizer(w.pop("chars").tolist())
+    tok = Tokenizer(w.pop("chars").tolist()) if "chars" in w else BPETokenizer(str(w.pop("tokenizer")))
+    return GPT(cfg, w, tok.eot), tok
 
 
 def sample_next(logits, temperature=1.0, top_k=None, top_p=None):
@@ -144,7 +166,8 @@ def generate_batch(model, prompts, max_new_tokens, sampling, stop=lambda i: Fals
 
     Prompts are left padded to the same length. Learned positions must start at 0 for every prompt, so
     each row gets its own position ids, and padding slots are masked out of attention. Row i finishes
-    after max_new_tokens[i] tokens or once stop(i) is true, and is dropped from the batch.
+    after max_new_tokens[i] tokens, at the model's end-of-text token, or once stop(i) is true, and is
+    dropped from the batch.
     Each len(prompts[i]) + max_new_tokens[i] must fit in block_size (the API enforces this).
     """
     lens = np.array([len(p) for p in prompts])
@@ -163,7 +186,7 @@ def generate_batch(model, prompts, max_new_tokens, sampling, stop=lambda i: Fals
         keep = []
         for j, i in enumerate(rows):
             produced[i] += 1
-            done = produced[i] >= max_new_tokens[i] or stop(i)
+            done = produced[i] >= max_new_tokens[i] or stop(i) or nxt[j, 0] == model.eot
             yield i, int(nxt[j, 0]), done
             if not done:
                 keep.append(j)

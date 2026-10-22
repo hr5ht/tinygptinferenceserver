@@ -2,8 +2,16 @@
 // in the play format it was trained on ("ROMEO.\n<speech>\n\n"), ending with the name of the
 // character whose turn it is, and the model writes that character's speech.
 
-const BLOCK_SIZE = 256; // the model's context in characters: prompt + reply
-const MAX_INPUT = 100; // MAX_INPUT + two names + the longest reply (120) still fits in BLOCK_SIZE
+const BLOCK_SIZE = 256; // both models' context in tokens: prompt + reply
+const MAX_INPUT = 100; // MAX_INPUT + two names + the longest reply (120 chars) fits either model
+
+// v1 reads letters (1 char per token); v2 reads word pieces (~3.3 chars per token on this text; 2.5 leaves margin).
+// v1 spells best close to its likeliest letters: at 0.8 / top-k 50 it drifts into made-up words, at 0.5 / 20
+// it writes real lines. v2 already knows its words, so it can afford more variety.
+const MODELS = {
+  v2: { charsPerToken: 2.5, temperature: 0.7, topK: 40 },
+  v1: { charsPerToken: 1, temperature: 0.5, topK: 20 },
+};
 
 // every name here occurs 30+ times as a speaker in the training text
 const SCENES = [
@@ -17,10 +25,9 @@ const SCENES = [
 ];
 const STOCK_LINES = ["Good morrow. What news?", "I pray thee, tell me what thou thinkest."];
 
-/** The scene so far as a script, cut from the front to leave room for the reply. */
-function buildPrompt(lines, next, maxTokens) {
+/** The scene so far as a script, cut from the front to fit `budget` characters. */
+function buildPrompt(lines, next, budget) {
   const script = lines.map((l) => `${l.speaker}.\n${l.text}\n\n`).join("") + `${next}.\n`;
-  const budget = BLOCK_SIZE - maxTokens;
   if (script.length <= budget) return script;
   // keep the most recent speeches, starting cleanly at a speaker's name
   const tail = script.slice(-budget);
@@ -48,6 +55,7 @@ const ICON_SEND = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" s
 const ICON_STOP = '<svg width="12" height="12" viewBox="0 0 12 12"><rect width="12" height="12" rx="2" fill="currentColor"/></svg>';
 
 let scene = SCENES[0];
+let model = "v2";
 let lines = []; // speeches that made it into the scene (a failed turn is left out, or every later turn fails too)
 let ctrl = null; // the request in flight
 
@@ -108,6 +116,7 @@ async function send(said) {
   $("new-scene").disabled = false;
   addMessage(scene.you, true).body.textContent = text;
   const { msg, body } = addMessage(scene.them, false);
+  msg.querySelector(".who").append(el("span", "tag", model));
   const words = document.createTextNode("");
   const caret = el("span", "caret");
   body.append(words, caret);
@@ -116,7 +125,9 @@ async function send(said) {
   scrollDown();
 
   const turn = [{ speaker: scene.you, text }];
-  const maxTokens = +$("len").value;
+  const { charsPerToken, topK } = MODELS[model];
+  const maxTokens = Math.ceil(+$("len").value / charsPerToken);
+  const budget = Math.floor((BLOCK_SIZE - maxTokens) * charsPerToken);
   const controller = (ctrl = new AbortController());
   setBusy(true);
   const start = performance.now();
@@ -140,7 +151,7 @@ async function send(said) {
     const res = await fetch("/v1/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: buildPrompt([...lines, ...turn], scene.them, maxTokens), max_tokens: maxTokens, temperature: +$("temp").value, stream: true }),
+      body: JSON.stringify({ prompt: buildPrompt([...lines, ...turn], scene.them, budget), max_tokens: maxTokens, temperature: +$("temp").value, top_k: topK, stream: true, model }),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -199,6 +210,12 @@ function showSettings() {
 }
 
 $("scene").append(...SCENES.map((s, i) => new Option(s.play, i)));
+// switching models keeps the scene going, so both can be compared on the same conversation
+$("model").onchange = (e) => {
+  model = e.target.value;
+  $("temp").value = MODELS[model].temperature;
+  showSettings();
+};
 $("scene").onchange = (e) => resetScene(+e.target.value);
 $("new-scene").onclick = () => resetScene(+$("scene").value);
 $("settings-toggle").onclick = () => {

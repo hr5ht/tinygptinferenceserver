@@ -4,6 +4,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -51,17 +52,19 @@ app.add_middleware(
 
 
 class GenerateRequest(BaseModel):
-    # same limits as the server, so bad input never costs an upstream call
-    prompt: str = Field(min_length=1)
+    # same limits as the server, so bad input never costs an upstream call. v1's tokens are characters,
+    # so its context is checked here; v2's word pieces are counted by the server, which has the tokenizer
+    prompt: str = Field(min_length=1, max_length=4000)
     max_tokens: int = Field(100, ge=1, le=BLOCK_SIZE - 1)
     temperature: float = Field(0.8, ge=0, le=2)
     top_k: int | None = Field(50, ge=1)
     top_p: float | None = Field(None, gt=0, le=1)
     stream: bool = False
+    model: Literal["v1", "v2"] = "v1"
 
     @model_validator(mode="after")
     def fits_context(self):
-        if len(self.prompt) + self.max_tokens > BLOCK_SIZE:
+        if self.model == "v1" and len(self.prompt) + self.max_tokens > BLOCK_SIZE:
             raise ValueError(f"prompt length + max_tokens must be at most {BLOCK_SIZE}")
         return self
 
@@ -122,10 +125,10 @@ async def generate(body: GenerateRequest, request: Request, authorization: str =
     if body.stream:
         return await stream(client, payload)
 
-    # greedy output depends only on prompt + length, so it's cached; sampled output is meant to differ
+    # greedy output depends only on model + prompt + length, so it's cached; sampled output is meant to differ
     cache_key = None
     if body.temperature == 0 and redis:
-        cache_key = "cache:" + hashlib.sha256(json.dumps([body.prompt, body.max_tokens]).encode()).hexdigest()
+        cache_key = "cache:" + hashlib.sha256(json.dumps([body.model, body.prompt, body.max_tokens]).encode()).hexdigest()
         if hit := await redis.get(cache_key):
             return JSONResponse(json.loads(hit), headers={"X-Cache": "HIT"})
 
