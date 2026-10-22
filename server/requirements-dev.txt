@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest
+httpx
+locust
+# convert.py only
+torch
+huggingface_hub

@@ -1,4 +1,4 @@
-torch
 numpy
-huggingface_hub
-pytest
+fastapi
+uvicorn
+prometheus_client

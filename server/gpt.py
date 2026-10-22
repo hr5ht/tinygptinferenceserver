@@ -1,15 +1,19 @@
+"""Inference-only numpy port of the notebook's model, so the server ships without torch (715 MB, over Vercel's limit)."""
+import json
 import math
+import os
+import tempfile
+import urllib.request
 from dataclasses import dataclass
 
-import torch
-import torch.nn as nn
-from huggingface_hub import hf_hub_download
-from torch.nn import functional as F
+import numpy as np
 
 HF_REPO = "hr5ht/tinygpt-shakespeare"
 
 # the training text had curly quotes turned into straight ones, so prompts get the same treatment
 QUOTES = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"'})
+
+RNG = np.random.default_rng()  # only the batcher thread samples
 
 
 @dataclass
@@ -19,90 +23,73 @@ class GPTConfig:
     n_layer: int = 6
     n_head: int = 6
     n_embd: int = 384
-    dropout: float = 0.2
+    dropout: float = 0.2  # training only, kept so the checkpoint's config loads as is
 
 
-class CausalSelfAttention(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        assert cfg.n_embd % cfg.n_head == 0
-        self.n_head = cfg.n_head
-        self.qkv = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=False)
-        self.proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=False)
-        self.attn_drop = nn.Dropout(cfg.dropout)
-        self.resid_drop = nn.Dropout(cfg.dropout)
-        self.register_buffer("mask", torch.tril(torch.ones(cfg.block_size, cfg.block_size, dtype=torch.bool)))
+def softmax(x):
+    e = np.exp(x - x.max(-1, keepdims=True))
+    return e / e.sum(-1, keepdims=True)
 
-    def forward(self, x, cache=None):
-        B, T, C = x.shape
-        q, k, v = self.qkv(x).split(C, dim=2)
+
+def layer_norm(x, w, b, eps=1e-5):
+    return (x - x.mean(-1, keepdims=True)) / np.sqrt(x.var(-1, keepdims=True) + eps) * w + b
+
+
+def erf(x):
+    # Abramowitz & Stegun 7.1.26 (max error 1.5e-7); numpy has no erf and scipy is too big to ship for one function
+    s, x = np.sign(x), np.abs(x)
+    t = 1 / (1 + 0.3275911 * x)
+    y = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * np.exp(-x * x)
+    return s * y
+
+
+def gelu(x):
+    return 0.5 * x * (1 + erf(x / math.sqrt(2)))  # exact GELU, same as nn.GELU()
+
+
+class GPT:
+    def __init__(self, cfg, w):
+        self.cfg, self.w = cfg, w
+
+    def _attn(self, x, p, cache, key_mask):
+        w, B, T, C = self.w, *x.shape
+        H = self.cfg.n_head
+        q, k, v = np.split(x @ w[p + "attn.qkv.weight"].T, 3, axis=-1)
         # (B, T, C) -> (B, n_head, T, head_size)
-        q, k, v = (t.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) for t in (q, k, v))
+        q, k, v = (t.reshape(B, T, H, C // H).transpose(0, 2, 1, 3) for t in (q, k, v))
         if cache is not None:
             # keys/values of earlier positions go in front of the new ones
-            k = torch.cat([cache[0], k], dim=2)
-            v = torch.cat([cache[1], v], dim=2)
-        S = k.size(2)  # past + current positions
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(k.size(-1))
+            k = np.concatenate([cache[0], k], axis=2)
+            v = np.concatenate([cache[1], v], axis=2)
+        S = k.shape[2]  # past + current positions
+        att = q @ k.transpose(0, 1, 3, 2) / math.sqrt(C // H)
+        if key_mask is not None:
+            # padding slots are never attended to; -1e9 instead of -inf keeps rows that are all padding finite
+            att = np.where(key_mask[:, None, None, :], att, -1e9)
         # the new queries sit at positions S-T..S-1, each sees keys up to itself
-        att = att.masked_fill(~self.mask[S - T:S, :S], float("-inf"))
-        att = self.attn_drop(F.softmax(att, dim=-1))
-        y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
-        return self.resid_drop(self.proj(y)), (k, v)
+        att = np.where(np.tril(np.ones((T, S), dtype=bool), k=S - T), att, -np.inf)
+        y = (softmax(att) @ v).transpose(0, 2, 1, 3).reshape(B, T, C)
+        return y @ w[p + "attn.proj.weight"].T, (k, v)
 
-
-class Block(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.ln1 = nn.LayerNorm(cfg.n_embd)
-        self.attn = CausalSelfAttention(cfg)
-        self.ln2 = nn.LayerNorm(cfg.n_embd)
-        self.mlp = nn.Sequential(
-            nn.Linear(cfg.n_embd, 4 * cfg.n_embd),
-            nn.GELU(),
-            nn.Linear(4 * cfg.n_embd, cfg.n_embd),
-            nn.Dropout(cfg.dropout),
-        )
-
-    def forward(self, x, cache=None):
-        a, cache = self.attn(self.ln1(x), cache)
-        x = x + a
-        x = x + self.mlp(self.ln2(x))
-        return x, cache
-
-
-class GPT(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.n_embd)
-        self.pos_emb = nn.Embedding(cfg.block_size, cfg.n_embd)
-        self.drop = nn.Dropout(cfg.dropout)
-        self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layer))
-        self.ln_f = nn.LayerNorm(cfg.n_embd)
-        self.head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
-        self.head.weight = self.tok_emb.weight  # tied embeddings
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, (nn.Linear, nn.Embedding)):
-            nn.init.normal_(m.weight, mean=0.0, std=0.02)
-        if isinstance(m, nn.Linear) and m.bias is not None:
-            nn.init.zeros_(m.bias)
-
-    def forward(self, idx, targets=None, caches=None):
-        B, T = idx.shape
-        past = 0 if caches is None else caches[0][0].size(2)
+    def __call__(self, idx, caches=None, pos=None, key_mask=None):
+        """idx: (B, T) token ids. pos: (B, T) position ids when rows are padded differently;
+        key_mask: (B, past + T), False on padding. Returns logits (B, T, vocab) and the new caches."""
+        w, (B, T) = self.w, idx.shape
+        past = 0 if caches is None else caches[0][0].shape[2]
         assert past + T <= self.cfg.block_size, "sequence longer than block_size"
-        pos = torch.arange(past, past + T, device=idx.device)
-        x = self.drop(self.tok_emb(idx) + self.pos_emb(pos))
+        if pos is None:
+            pos = np.arange(past, past + T)
+        x = w["tok_emb.weight"][idx] + w["pos_emb.weight"][pos]
         new_caches = []
-        for i, block in enumerate(self.blocks):
-            x, c = block(x, None if caches is None else caches[i])
+        for i in range(self.cfg.n_layer):
+            p = f"blocks.{i}."
+            a, c = self._attn(layer_norm(x, w[p + "ln1.weight"], w[p + "ln1.bias"]), p, None if caches is None else caches[i], key_mask)
+            x = x + a
+            h = gelu(layer_norm(x, w[p + "ln2.weight"], w[p + "ln2.bias"]) @ w[p + "mlp.0.weight"].T + w[p + "mlp.0.bias"])
+            x = x + h @ w[p + "mlp.2.weight"].T + w[p + "mlp.2.bias"]
             new_caches.append(c)
-        logits = self.head(self.ln_f(x))
-        loss = None if targets is None else F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-        return logits, loss, new_caches
+        logits = layer_norm(x, w["ln_f.weight"], w["ln_f.bias"]) @ w["tok_emb.weight"].T  # tied embeddings
+        return logits, new_caches
 
 
 class Tokenizer:
@@ -121,52 +108,75 @@ class Tokenizer:
         return "".join(self.chars[i] for i in ids)
 
 
-def load(repo=HF_REPO, device="cpu"):
-    """Download the checkpoint from the Hugging Face Hub (cached after the first call) and rebuild model + tokenizer."""
-    ckpt = torch.load(hf_hub_download(repo, "shakespeare.pt"), map_location=device)
-    model = GPT(GPTConfig(**ckpt["config"])).to(device).eval()
-    model.load_state_dict(ckpt["model"])
-    return model, Tokenizer(ckpt["chars"])
+def load(repo=HF_REPO):
+    """Download shakespeare.npz (made by convert.py) from the Hugging Face Hub once, then rebuild model + tokenizer.
+    Cached in the temp dir, the only writable place on Vercel."""
+    path = os.path.join(tempfile.gettempdir(), repo.replace("/", "--") + ".npz")
+    if not os.path.exists(path):
+        urllib.request.urlretrieve(f"https://huggingface.co/{repo}/resolve/main/shakespeare.npz", path + ".part")
+        os.replace(path + ".part", path)
+    with np.load(path) as f:
+        w = {k: f[k] for k in f.files}
+    cfg = GPTConfig(**json.loads(str(w.pop("config"))))
+    return GPT(cfg, w), Tokenizer(w.pop("chars").tolist())
 
 
 def sample_next(logits, temperature=1.0, top_k=None, top_p=None):
-    """logits: (B, vocab) for the last position -> (B, 1) next token ids. temperature=0 is greedy."""
+    """logits: (vocab,) for the last position -> next token id. temperature=0 is greedy."""
     if temperature == 0:
-        return logits.argmax(dim=-1, keepdim=True)
-    logits = logits / temperature
+        return int(logits.argmax())
+    logits = logits.astype(np.float64) / temperature  # float64 so the probabilities sum to 1 for rng.choice
     if top_k is not None:
-        kth = torch.topk(logits, min(top_k, logits.size(-1))).values[:, [-1]]
-        logits = logits.masked_fill(logits < kth, float("-inf"))
+        kth = np.sort(logits)[-min(top_k, logits.size)]
+        logits = np.where(logits < kth, -np.inf, logits)
+    probs = softmax(logits)
     if top_p is not None:
-        sorted_logits, sorted_idx = torch.sort(logits, descending=True)
-        probs = F.softmax(sorted_logits, dim=-1)
+        order = np.argsort(-probs)
+        sorted_probs = probs[order]
         # drop a token once the tokens before it already cover top_p (the top one always stays)
-        sorted_logits[probs.cumsum(dim=-1) - probs >= top_p] = float("-inf")
-        logits = torch.full_like(logits, float("-inf")).scatter(-1, sorted_idx, sorted_logits)
-    return torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+        probs[order[np.cumsum(sorted_probs) - sorted_probs >= top_p]] = 0
+        probs /= probs.sum()
+    return int(RNG.choice(probs.size, p=probs))
 
 
-@torch.no_grad()
-def generate(model, idx, max_new_tokens, **sampling):
-    """Re-runs the whole window every step. Kept as the reference the cached path is tested against."""
-    for _ in range(max_new_tokens):
-        logits, _, _ = model(idx[:, -model.cfg.block_size:])
-        idx = torch.cat([idx, sample_next(logits[:, -1], **sampling)], dim=1)
-    return idx
+def generate_batch(model, prompts, max_new_tokens, sampling, stop=lambda i: False):
+    """Generate for several prompts at once. Yields (i, token, done) for every live row each step.
 
+    Prompts are left padded to the same length. Learned positions must start at 0 for every prompt, so
+    each row gets its own position ids, and padding slots are masked out of attention. Row i finishes
+    after max_new_tokens[i] tokens or once stop(i) is true, and is dropped from the batch.
+    Each len(prompts[i]) + max_new_tokens[i] must fit in block_size (the API enforces this).
+    """
+    lens = np.array([len(p) for p in prompts])
+    pad = lens.max() - lens
+    idx = np.array([[0] * n + p for n, p in zip(pad, prompts)])
+    slots = np.arange(lens.max())
+    valid = slots[None, :] >= pad[:, None]
+    pos = np.maximum(slots[None, :] - pad[:, None], 0)
+    logits, caches = model(idx, pos=pos, key_mask=valid)
 
-@torch.no_grad()
-def generate_cached(model, idx, max_new_tokens, **sampling):
-    """Runs the prompt once, then feeds one token at a time and reuses the KV cache."""
-    bs = model.cfg.block_size
-    logits, _, caches = model(idx[:, -bs:])
-    for _ in range(max_new_tokens):
-        nxt = sample_next(logits[:, -1], **sampling)
-        idx = torch.cat([idx, nxt], dim=1)
-        if caches[0][0].size(2) == bs:
-            # learned absolute positions can't slide, so a full cache is rebuilt from the last half window
-            # (output differs from `generate` past block_size); rotary embeddings would allow a rolling cache
-            logits, _, caches = model(idx[:, -(bs // 2):])
-        else:
-            logits, _, caches = model(nxt, caches=caches)
-    return idx
+    rows = list(range(len(prompts)))  # original index of each live row
+    produced = [0] * len(prompts)
+    next_pos = lens.copy()
+    while True:
+        nxt = np.array([[sample_next(logits[j, -1], **sampling[i])] for j, i in enumerate(rows)])
+        keep = []
+        for j, i in enumerate(rows):
+            produced[i] += 1
+            done = produced[i] >= max_new_tokens[i] or stop(i)
+            yield i, int(nxt[j, 0]), done
+            if not done:
+                keep.append(j)
+        if not keep:
+            return
+        if len(keep) < len(rows):
+            nxt, valid, next_pos = nxt[keep], valid[keep], next_pos[keep]
+            caches = [(k[keep], v[keep]) for k, v in caches]
+            rows = [rows[j] for j in keep]
+            # drop slots that are padding for every remaining row, so the cache stays within block_size
+            trim = int((~valid).sum(axis=1).min())
+            valid = valid[:, trim:]
+            caches = [(k[:, :, trim:], v[:, :, trim:]) for k, v in caches]
+        valid = np.concatenate([valid, np.ones((len(rows), 1), dtype=bool)], axis=1)
+        logits, caches = model(nxt, caches=caches, pos=next_pos[:, None], key_mask=valid)
+        next_pos += 1

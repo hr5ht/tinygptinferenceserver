@@ -1,5 +1,6 @@
 data/
 *.pt
+*.npz
 .ipynb_checkpoints/
 __pycache__/
 .DS_Store
@@ -10,3 +11,7 @@ PLAN*.md
 
 # tests stay local
 test_*.py
+
+# secrets
+.env*
+.vercel/
