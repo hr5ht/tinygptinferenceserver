@@ -11,6 +11,8 @@ A 10.77M-parameter GPT written from scratch in PyTorch (no Hugging Face model cl
 model/
   model.ipynb   data prep, model, KV cache, training, benchmarks (saved T4 outputs)
   losses.csv    train/val loss every 250 steps
+server/
+  gpt.py        model + KV cache generation for serving, loads the checkpoint from the Hub
 ```
 
 The checkpoint (`shakespeare.pt`) and the raw text are not in the repo: the checkpoint lives on the Hugging Face Hub and the notebook downloads the text itself.

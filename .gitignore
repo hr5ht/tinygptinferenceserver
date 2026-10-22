@@ -7,3 +7,6 @@ __pycache__/
 
 # local planning notes
 PLAN*.md
+
+# tests stay local
+test_*.py
