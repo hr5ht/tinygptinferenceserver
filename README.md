@@ -1,9 +1,19 @@
 # tinygpt: a character-level GPT trained on Shakespeare
 
-A 10.77M-parameter GPT written from scratch in PyTorch (no Hugging Face model classes), trained on the complete works of Shakespeare. Everything (data prep, model, KV cache, sampling, training, benchmarks) is in [`model.ipynb`](model.ipynb).
+A 10.77M-parameter GPT written from scratch in PyTorch (no Hugging Face model classes), trained on the complete works of Shakespeare. Everything (data prep, model, KV cache, sampling, training, benchmarks) is in [`model/model.ipynb`](model/model.ipynb).
 
 - Trained checkpoint: [hr5ht/tinygpt-shakespeare](https://huggingface.co/hr5ht/tinygpt-shakespeare)
 - Run it yourself: [open in Colab](https://colab.research.google.com/github/hr5ht/tinygptinferenceserver/blob/main/model/model.ipynb) → Runtime → T4 GPU → Run all
+
+## Repository layout
+
+```
+model/
+  model.ipynb   data prep, model, KV cache, training, benchmarks (saved T4 outputs)
+  losses.csv    train/val loss every 250 steps
+```
+
+The checkpoint (`shakespeare.pt`) and the raw text are not in the repo: the checkpoint lives on the Hugging Face Hub and the notebook downloads the text itself.
 
 ## Data
 
@@ -32,7 +42,7 @@ A 10.77M-parameter GPT written from scratch in PyTorch (no Hugging Face model cl
 | 3000 | 1.139 | 1.364 |
 | 3999 | 1.107 | **1.339** |
 
-Full log: [`losses.csv`](losses.csv). Step 0 loss matches ln(97) ≈ 4.57, the loss of a uniform guess over the vocabulary.
+Full log: [`model/losses.csv`](model/losses.csv). Step 0 loss matches ln(97) ≈ 4.57, the loss of a uniform guess over the vocabulary.
 
 ## Sample
 
