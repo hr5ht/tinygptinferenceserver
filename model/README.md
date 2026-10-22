@@ -3,7 +3,7 @@
 A 10.77M-parameter GPT written from scratch in PyTorch (no Hugging Face model classes), trained on the complete works of Shakespeare. Everything (data prep, model, KV cache, sampling, training, benchmarks) is in [`model.ipynb`](model.ipynb).
 
 - Trained checkpoint: [hr5ht/tinygpt-shakespeare](https://huggingface.co/hr5ht/tinygpt-shakespeare)
-- Run it yourself: [open in Colab](https://colab.research.google.com/github/hr5ht/tinygptinferenceserver/blob/main/model.ipynb) → Runtime → T4 GPU → Run all
+- Run it yourself: [open in Colab](https://colab.research.google.com/github/hr5ht/tinygptinferenceserver/blob/main/model/model.ipynb) → Runtime → T4 GPU → Run all
 
 ## Data
 
