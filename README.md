@@ -4,6 +4,25 @@ A 10.77M-parameter GPT written from scratch in PyTorch (no Hugging Face model cl
 
 - Trained checkpoint: [hr5ht/tinygpt-shakespeare](https://huggingface.co/hr5ht/tinygpt-shakespeare)
 - Run it yourself: [open in Colab](https://colab.research.google.com/github/hr5ht/tinygptinferenceserver/blob/main/model/model.ipynb) → Runtime → T4 GPU → Run all
+- **Try it: [tinygpt-gateway.vercel.app](https://tinygpt-gateway.vercel.app)**: play a scene with the model. API docs: [/docs](https://tinygpt-gateway.vercel.app/docs).
+
+## Architecture
+
+```
+browser (chat page) ─┐
+                     ├─HTTPS─▶ gateway (Vercel) ──Bearer MODEL_TOKEN──▶ server (Vercel) ──▶ numpy GPT + KV cache
+curl / your code ────┘            │                                        │ on cold start
+                                  └── Upstash Redis                        ▼
+                                      rate limits, cache          Hugging Face Hub: weights
+```
+
+- **model:** trained once in a notebook on a T4. The weights live on the Hugging Face Hub.
+- **server:** runs the model: KV cache, dynamic batching, streaming, back-pressure. Only the gateway can call it.
+- **gateway:** the public front door:
+  - API keys and per-caller rate limits;
+  - a cache for repeated requests;
+  - clean errors;
+  - the chat page at `/`, written in plain HTML, CSS and JavaScript.
 
 ## Repository layout
 
@@ -17,6 +36,10 @@ server/                inference server (runs on Vercel)
   batcher.py           request queue + worker thread that batches requests
   app.py               FastAPI: /health, /v1/generate (JSON or streaming), /metrics
   load/                locust load test, batching on vs off, results as csv
+gateway/               public API (runs on Vercel)
+  app.py               FastAPI: validation, API keys, rate limits, cache, CORS, proxy to the server (JSON or streaming)
+  store.py             Upstash Redis over REST: token bucket (Lua), cache
+  static/              the chat page (plain HTML/CSS/JS): index.html, style.css, app.js
 ```
 
 The checkpoint (`shakespeare.pt`) and the raw text are not in the repo: the checkpoint lives on the Hugging Face Hub and the notebook downloads the text itself.
@@ -131,3 +154,56 @@ vercel deploy --prod
 ```
 
 Each new instance downloads the 43 MB of weights from the Hub on cold start, which takes a few seconds. Metrics are per instance.
+
+## Gateway
+
+[`gateway/`](gateway/) is what the public talks to. It serves the chat page at `/` and exposes the same `POST /v1/generate` as the server, with CORS open so browsers on other sites can call it too. It never exposes the server's `MODEL_TOKEN`.
+
+- **Callers:**
+  - without a key, the caller is identified by IP (10 requests/min); the chat page works this way.
+  - with `Authorization: Bearer <api key>`, the key must be in `API_KEYS` and gets 60 requests/min. A wrong key is a `401`, not a fallback to anonymous.
+- **Rate limits:** each caller has a token bucket in Upstash Redis. Refill and take run in one Lua script, so they're atomic across serverless instances. A caller over the limit gets `429` with `Retry-After`. Redis is reached over HTTPS, so there are no connections to pool in serverless functions.
+- **Cache:** greedy requests (`temperature: 0`) always produce the same output, so they're cached for a day (`X-Cache: HIT`). Sampled requests are never cached.
+- **Errors:**
+  - the gateway rejects bad input itself (`422`), without calling the server;
+  - the server's `422` (unknown character), `503` (busy) and `504` pass through;
+  - any other upstream failure becomes `502`.
+- **Streaming:** server-sent events are relayed byte for byte. When the client disconnects, the upstream connection closes too, so the server stops generating.
+- **Redis unavailable:** if it isn't configured, or it's down, limits and cache are off and the API keeps working.
+
+```
+curl -X POST https://tinygpt-gateway.vercel.app/v1/generate -H 'content-type: application/json' \
+  -d '{"prompt": "ROMEO.\n", "max_tokens": 200}'
+```
+
+Run locally against the deployed server, with no Redis, so no limits or cache:
+
+```
+cd gateway
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+SERVER_URL=https://tinygpt-server.vercel.app MODEL_TOKEN=... .venv/bin/uvicorn app:app --port 8001
+```
+
+Deploy: a Vercel project with Root Directory `gateway`. Project settings:
+
+| variable | value |
+|---|---|
+| `SERVER_URL` | the server's URL |
+| `MODEL_TOKEN` | same value as the server's |
+| `API_KEYS` | comma-separated keys you hand out |
+| Upstash | add Upstash Redis from Vercel's Storage tab; it sets `KV_REST_API_URL` and `KV_REST_API_TOKEN` |
+
+## Chat page
+
+[`gateway/static/`](gateway/static/) is the chat at [tinygpt-gateway.vercel.app](https://tinygpt-gateway.vercel.app). It's plain HTML, CSS and JavaScript with no build step, served by the gateway itself. The model only continues text, so a chat is played as a scene:
+- you speak as one character (e.g. ROMEO) and the model replies as another (JULIET);
+- the conversation is written out in the format the model was trained on: `ROMEO.\n<speech>\n\nJULIET.\n`;
+- the model continues the script.
+
+How it fits the model's limits:
+- **Context:** older speeches are dropped from the front of the script, so prompt plus reply always fit in the 256-character context.
+- **Ending a reply:** a reply ends at the first blank line, where the model would start the next speaker. The app stops reading and hangs up there. The gateway closes the upstream connection and the server stops generating, so a reply costs only the characters it shows.
+
+Seven scenes are included, from *Romeo and Juliet* to *King Lear*. Every character name occurs at least 30 times in the training text, so the model has learned each one's speech format.
+
+Locally it's served at `http://localhost:8001` by the gateway command above.
