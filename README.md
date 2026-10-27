@@ -206,4 +206,6 @@ How it fits the model's limits:
 
 Seven scenes are included, from *Romeo and Juliet* to *King Lear*. Every character name occurs at least 30 times in the training text, so the model has learned each one's speech format.
 
+The layout follows the usual LLM chat app: scenes in a collapsible sidebar (a drawer on phones), each keeping its own conversation; the model picker and sampling settings in the header; suggested lines and the composer at the bottom. It ships a dark theme, with every color a CSS variable so a light theme only overrides that block.
+
 Locally it's served at `http://localhost:8001` by the gateway command above.

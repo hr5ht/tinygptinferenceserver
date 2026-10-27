@@ -23,7 +23,12 @@ const SCENES = [
   { you: "PROSPERO", them: "MIRANDA", play: "The Tempest", opening: "Thy father was the Duke of Milan." },
   { you: "LEAR", them: "CORDELIA", play: "King Lear", opening: "What can you say to draw a third more opulent than your sisters?" },
 ];
-const STOCK_LINES = ["Good morrow. What news?", "I pray thee, tell me what thou thinkest."];
+// suggestions under the greeting: the scene's own opening line, then lines that suit any scene
+const STOCK_LINES = [
+  { title: "Ask for news", line: "Good morrow. What news?" },
+  { title: "Ask their mind", line: "I pray thee, tell me what thou thinkest." },
+  { title: "Demand an answer", line: "Speak, I charge thee: what wouldst thou have?" },
+];
 
 /** The scene so far as a script, cut from the front to fit `budget` characters. */
 function buildPrompt(lines, next, budget) {
@@ -51,13 +56,27 @@ const cleanInput = (s) => s.replace(/\s+/g, " ").trim().slice(0, MAX_INPUT);
 const titleCase = (name) => name.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 
 const $ = (id) => document.getElementById(id);
-const ICON_SEND = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
-const ICON_STOP = '<svg width="12" height="12" viewBox="0 0 12 12"><rect width="12" height="12" rx="2" fill="currentColor"/></svg>';
+const svg = (size, body, attrs = 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"') =>
+  `<svg width="${size}" height="${size}" viewBox="0 0 24 24" ${attrs}>${body}</svg>`;
+const ICONS = {
+  send: svg(16, '<path d="M12 19V5M5 12l7-7 7 7"/>', 'fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"'),
+  stop: svg(12, '<rect x="3" y="3" width="18" height="18" rx="3"/>', 'fill="currentColor"'),
+  copy: svg(14, '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+  check: svg(14, '<path d="M20 6 9 17l-5-5"/>'),
+  spark: svg(14, '<path d="M12 2l2.2 6.3a2 2 0 0 0 1.5 1.5L22 12l-6.3 2.2a2 2 0 0 0-1.5 1.5L12 22l-2.2-6.3a2 2 0 0 0-1.5-1.5L2 12l6.3-2.2a2 2 0 0 0 1.5-1.5z"/>', 'fill="currentColor"'),
+};
 
+// One conversation per scene, so switching scenes in the sidebar keeps each one going.
+// messages: what the thread shows. lines: the speeches that made it into the scene (a failed turn is left
+// out, or every later turn fails too).
+const newConvo = () => ({ messages: [], lines: [] });
+const convos = SCENES.map(newConvo);
+let sceneIdx = 0;
 let scene = SCENES[0];
+let convo = convos[0];
 let model = "v2";
-let lines = []; // speeches that made it into the scene (a failed turn is left out, or every later turn fails too)
 let ctrl = null; // the request in flight
+let stick = true; // follow the reply as it streams, unless the reader has scrolled up
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -66,65 +85,171 @@ function el(tag, className, text) {
   return node;
 }
 
-function scrollDown() {
-  window.scrollTo({ top: document.body.scrollHeight });
+/* ---------- scrolling ---------- */
+
+const thread = $("thread");
+const nearBottom = () => thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80;
+
+function scrollDown(force) {
+  if (force || stick) thread.scrollTop = thread.scrollHeight;
 }
 
-function setBusy(busy) {
-  const send = $("send");
-  send.classList.toggle("stop", busy);
-  send.innerHTML = busy ? ICON_STOP : ICON_SEND;
-  send.setAttribute("aria-label", busy ? "Stop" : "Send");
-  send.type = busy ? "button" : "submit";
-  send.disabled = !busy && !$("input").value.trim();
+thread.onscroll = () => {
+  stick = nearBottom();
+  $("to-bottom").hidden = stick;
+};
+$("to-bottom").onclick = () => thread.scrollTo({ top: thread.scrollHeight, behavior: "smooth" });
+
+/* ---------- rendering ---------- */
+
+function renderSidebar() {
+  $("scene-list").replaceChildren(
+    ...SCENES.map((s, i) => {
+      const last = convos[i].messages.findLast((m) => m.text);
+      const item = el("button", "scene-item");
+      item.append(el("span", "title", s.play), el("span", "sub", last ? last.text : `${titleCase(s.you)} & ${titleCase(s.them)}`));
+      if (i === sceneIdx) item.setAttribute("aria-current", "true");
+      item.onclick = () => {
+        if (i !== sceneIdx) {
+          ctrl?.abort(); // a reply in flight keeps what it said, in its own scene
+          showScene(i);
+        }
+        if (mobile.matches) setSidebar(false);
+        $("input").focus();
+      };
+      const li = el("li");
+      li.append(item);
+      return li;
+    }),
+  );
 }
 
-function resetScene(idx) {
-  ctrl?.abort();
-  scene = SCENES[idx];
-  lines = [];
-  document.querySelectorAll(".msg").forEach((m) => m.remove());
-  $("empty").hidden = false;
-  $("new-scene").disabled = true;
+function renderSuggestions() {
+  $("suggestions").replaceChildren(
+    ...[{ title: "Open the scene", line: scene.opening }, ...STOCK_LINES].map(({ title, line }) => {
+      const card = el("button", "suggestion");
+      card.type = "button";
+      card.append(el("b", "", title), el("span", "", line));
+      card.onclick = () => send(line);
+      return card;
+    }),
+  );
+}
+
+/** A message's node; `body` and `content` are kept so a streaming reply can be filled in. */
+function renderMessage(m) {
+  if (m.mine) {
+    const node = el("div", "msg user");
+    node.append(el("div", "who", titleCase(m.speaker)), el("div", "bubble", m.text));
+    return { node };
+  }
+  const node = el("div", "msg bot");
+  const avatar = el("div", "avatar");
+  avatar.innerHTML = ICONS.spark;
+  const content = el("div", "content");
+  const who = el("div", "who", titleCase(m.speaker));
+  who.append(el("span", "tag", m.model));
+  const body = el("div", "speech");
+  content.append(who, body);
+  node.append(avatar, content);
+  const view = { node, content, body };
+  if (m.done) settle(m, view);
+  return view;
+}
+
+/** Draw a finished reply: its text (or silence), then either the error or the copy button and speed. */
+function settle(m, view) {
+  view.body.replaceChildren(m.text || (m.error ? "" : el("span", "silence", "(silence)")));
+  view.body.hidden = !m.text && !!m.error;
+  if (m.error) return view.content.append(el("div", "error", m.error));
+  if (!m.text) return;
+  const actions = el("div", "actions");
+  const copy = el("button", "action");
+  copy.type = "button";
+  copy.title = "Copy";
+  copy.setAttribute("aria-label", "Copy");
+  copy.innerHTML = ICONS.copy;
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(m.text);
+      copy.innerHTML = ICONS.check;
+      setTimeout(() => (copy.innerHTML = ICONS.copy), 1500);
+    } catch {} // no clipboard access (insecure origin): nothing to do
+  };
+  actions.append(copy);
+  if (m.rate) actions.append(el("span", "meta", `${m.rate} chars/s`));
+  view.content.append(actions);
+}
+
+function renderThread() {
+  const chat = $("chat");
+  chat.querySelectorAll(".msg").forEach((n) => n.remove());
+  for (const m of convo.messages) chat.append(renderMessage(m).node);
+  const empty = !convo.messages.length;
+  $("empty").hidden = !empty;
+  $("suggestions").hidden = !empty;
+  stick = true;
+  scrollDown(true);
+}
+
+function showScene(i) {
+  sceneIdx = i;
+  scene = SCENES[i];
+  convo = convos[i];
+  $("scene-title").textContent = scene.play;
   $("play").textContent = scene.play;
   $("you").textContent = titleCase(scene.you);
   $("them").textContent = titleCase(scene.them);
   $("as").textContent = scene.you;
   $("input").placeholder = `Speak as ${titleCase(scene.you)}…`;
-  $("chips").replaceChildren(
-    ...[scene.opening, ...STOCK_LINES].map((line) => {
-      const chip = el("button", "", line);
-      chip.onclick = () => send(line);
-      return chip;
-    }),
-  );
+  renderSuggestions();
+  renderThread();
+  renderSidebar();
 }
 
-function addMessage(speaker, mine) {
-  const msg = el("div", mine ? "msg mine" : "msg");
-  msg.append(el("div", "who", speaker));
-  const body = el("div", mine ? "bubble" : "speech");
-  msg.append(body);
-  $("chat").append(msg);
-  return { msg, body };
+function newScene() {
+  ctrl?.abort();
+  convos[sceneIdx] = newConvo(); // the aborted reply lands in the old conversation, which is dropped
+  showScene(sceneIdx);
+  if (mobile.matches) setSidebar(false);
+  $("input").focus();
 }
+
+function setBusy(busy) {
+  const send = $("send");
+  send.innerHTML = busy ? ICONS.stop : ICONS.send;
+  send.setAttribute("aria-label", busy ? "Stop" : "Send");
+  send.title = busy ? "Stop" : "Send";
+  send.type = busy ? "button" : "submit";
+  send.disabled = !busy && !$("input").value.trim();
+}
+
+/* ---------- a turn ---------- */
 
 async function send(said) {
   const text = cleanInput(said);
   if (!text || ctrl) return;
+  // the turn belongs to this scene even if the reader switches to another one while it streams
+  const c = convo;
+  const sc = scene;
+  const turn = [{ speaker: sc.you, text }];
+  const mine = { mine: true, speaker: sc.you, text };
+  const m = { mine: false, speaker: sc.them, model, text: "", done: false };
+  c.messages.push(mine, m);
+
   $("empty").hidden = true;
-  $("new-scene").disabled = false;
-  addMessage(scene.you, true).body.textContent = text;
-  const { msg, body } = addMessage(scene.them, false);
-  msg.querySelector(".who").append(el("span", "tag", model));
+  $("suggestions").hidden = true;
+  $("chat").append(renderMessage(mine).node);
+  const view = renderMessage(m);
+  $("chat").append(view.node);
+  view.body.append(el("span", "thinking", "Thinking…"));
   const words = document.createTextNode("");
-  const caret = el("span", "caret");
-  body.append(words, caret);
   $("input").value = "";
   autosize();
-  scrollDown();
+  stick = true;
+  scrollDown(true);
+  renderSidebar();
 
-  const turn = [{ speaker: scene.you, text }];
   const { charsPerToken, topK } = MODELS[model];
   const maxTokens = Math.ceil(+$("len").value / charsPerToken);
   const budget = Math.floor((BLOCK_SIZE - maxTokens) * charsPerToken);
@@ -132,26 +257,29 @@ async function send(said) {
   setBusy(true);
   const start = performance.now();
   let raw = "";
-  let n = 0;
 
   const finish = (reply, error) => {
-    caret.remove();
-    if (error) return msg.append(el("div", "error", error));
-    words.textContent = reply;
-    if (reply) {
-      lines.push(...turn, { speaker: scene.them, text: reply });
-      if (n) msg.append(el("div", "meta", `${Math.round(n / ((performance.now() - start) / 1000))} chars/s`));
+    m.done = true;
+    if (error) {
+      m.text = cutReply(raw).text; // whatever arrived before the failure stays on screen, out of the scene
+      m.error = error;
     } else {
-      body.append(el("span", "silence", "(silence)"));
-      lines.push(...turn);
+      m.text = reply;
+      c.lines.push(...turn);
+      if (reply) {
+        c.lines.push({ speaker: sc.them, text: reply });
+        m.rate = Math.round(raw.length / ((performance.now() - start) / 1000));
+      }
     }
+    settle(m, view);
+    renderSidebar();
   };
 
   try {
     const res = await fetch("/v1/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: buildPrompt([...lines, ...turn], scene.them, budget), max_tokens: maxTokens, temperature: +$("temp").value, top_k: topK, stream: true, model }),
+      body: JSON.stringify({ prompt: buildPrompt([...c.lines, ...turn], sc.them, budget), max_tokens: maxTokens, temperature: +$("temp").value, top_k: topK, stream: true, model }),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -173,8 +301,8 @@ async function send(said) {
         if (!event.startsWith("data: {")) continue; // skips [DONE]
         const data = JSON.parse(event.slice(6));
         if (data.error) throw new Error(data.error);
+        if (!raw) view.body.replaceChildren(words, el("span", "caret"));
         raw += data.token;
-        n++;
         const cut = cutReply(raw);
         words.textContent = cut.text;
         scrollDown();
@@ -196,6 +324,8 @@ async function send(said) {
   }
 }
 
+/* ---------- composer, menus, sidebar ---------- */
+
 function autosize() {
   const input = $("input");
   input.style.height = "auto";
@@ -209,24 +339,85 @@ function showSettings() {
   $("len-value").textContent = `${$("len").value} chars`;
 }
 
-$("scene").append(...SCENES.map((s, i) => new Option(s.play, i)));
 // switching models keeps the scene going, so both can be compared on the same conversation
-$("model").onchange = (e) => {
-  model = e.target.value;
-  $("temp").value = MODELS[model].temperature;
+function setModel(name) {
+  model = name;
+  $("model-name").textContent = name;
+  document.querySelectorAll("#model-menu [data-model]").forEach((b) => b.setAttribute("aria-checked", b.dataset.model === name));
+  $("temp").value = MODELS[name].temperature;
   showSettings();
+}
+
+const MENUS = [[$("model-btn"), $("model-menu")], [$("settings-btn"), $("settings")]];
+
+function closeMenus() {
+  for (const [btn, menu] of MENUS) {
+    menu.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+  }
+}
+
+for (const [btn, menu] of MENUS) {
+  btn.onclick = () => {
+    const open = menu.hidden;
+    closeMenus();
+    menu.hidden = !open;
+    btn.setAttribute("aria-expanded", open);
+    if (open) menu.querySelector("[aria-checked=true], input")?.focus();
+  };
+}
+document.querySelectorAll("#model-menu [data-model]").forEach((item) => {
+  item.onclick = () => {
+    setModel(item.dataset.model);
+    closeMenus();
+    $("input").focus();
+  };
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".menu-wrap")) closeMenus();
+});
+
+// desktop: the sidebar is part of the layout and can be collapsed; phone: it's a drawer over the page
+const app = $("app");
+const mobile = matchMedia("(max-width: 768px)");
+const sidebarOpen = () => (mobile.matches ? app.classList.contains("sidebar-open") : !app.classList.contains("sidebar-collapsed"));
+
+function setSidebar(open) {
+  if (mobile.matches) {
+    app.classList.toggle("sidebar-open", open);
+    $("scrim").hidden = !open;
+  } else {
+    app.classList.toggle("sidebar-collapsed", !open);
+    try {
+      localStorage.setItem("sidebar", open ? "open" : "collapsed");
+    } catch {} // storage blocked: the choice just isn't remembered
+  }
+  $("sidebar-toggle").setAttribute("aria-expanded", open);
+}
+
+try {
+  if (localStorage.getItem("sidebar") === "collapsed") app.classList.add("sidebar-collapsed");
+} catch {}
+mobile.onchange = () => {
+  app.classList.remove("sidebar-open");
+  $("scrim").hidden = true;
+  $("sidebar-toggle").setAttribute("aria-expanded", sidebarOpen());
 };
-$("scene").onchange = (e) => resetScene(+e.target.value);
-$("new-scene").onclick = () => resetScene(+$("scene").value);
-$("settings-toggle").onclick = () => {
-  const open = $("settings").hidden;
-  $("settings").hidden = !open;
-  $("settings-toggle").setAttribute("aria-expanded", open);
-};
+$("sidebar-toggle").setAttribute("aria-expanded", sidebarOpen());
+$("sidebar-toggle").onclick = () => setSidebar(!sidebarOpen());
+$("scrim").onclick = () => setSidebar(false);
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  closeMenus();
+  if (mobile.matches) setSidebar(false);
+});
+
+$("sidebar-new").onclick = $("header-new").onclick = newScene;
 $("temp").oninput = $("len").oninput = showSettings;
 $("input").oninput = autosize;
 $("input").onkeydown = (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     send($("input").value);
   }
@@ -242,6 +433,6 @@ $("send").onclick = (e) => {
   }
 };
 
-showSettings();
-resetScene(0);
+setModel("v2");
+showScene(0);
 setBusy(false);

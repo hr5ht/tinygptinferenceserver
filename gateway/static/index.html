@@ -5,78 +5,117 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tinygpt</title>
 <meta name="description" content="Play a scene with a 10.77M-parameter GPT trained from scratch on Shakespeare.">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#09090b">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;1,400;1,500&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/style.css">
 <script src="/app.js" defer></script>
 </head>
 <body>
-<div class="app">
-  <header class="top">
-    <div class="brand">
-      <span class="mark">t</span>
-      <div>
-        <b>tinygpt</b>
-        <span class="tagline">Shakespeare, one character at a time</span>
-      </div>
-    </div>
-    <div class="actions">
-      <select id="model" aria-label="Model" title="v2: word pieces, learned English first. v1: letters, Shakespeare only.">
-        <option value="v2">v2</option>
-        <option value="v1">v1</option>
-      </select>
-      <select id="scene" aria-label="Scene"></select>
-      <button class="icon" id="settings-toggle" aria-label="Settings" title="Settings" aria-expanded="false">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
-      </button>
-      <button class="icon" id="new-scene" aria-label="New scene" title="New scene" disabled>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+<div class="app" id="app">
+  <aside class="sidebar" id="sidebar" aria-label="Scenes">
+    <div class="sidebar-head">
+      <a class="brand" href="/">
+        <img src="/icon.svg" width="24" height="24" alt="">
+        <span>tinygpt</span>
+      </a>
+      <button class="icon-btn" id="sidebar-new" aria-label="New scene" title="New scene">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
       </button>
     </div>
-  </header>
-
-  <div class="settings" id="settings" hidden>
-    <div class="settings-inner">
-      <div>
-        <label for="temp">Temperature <span id="temp-value"></span></label>
-        <input id="temp" type="range" min="0" max="1.5" step="0.1" value="0.7">
-        <small>0 always says the same thing; higher is wilder.</small>
-      </div>
-      <div>
-        <label for="len">Longest reply <span id="len-value"></span></label>
-        <input id="len" type="range" min="40" max="120" step="10" value="100">
-        <small>Replies usually end sooner, when the speech does.</small>
+    <nav class="scenes">
+      <p class="group-label">Scenes</p>
+      <ul id="scene-list"></ul>
+    </nav>
+    <div class="sidebar-foot">
+      <p>10.77M parameters, trained from scratch on the complete works of Shakespeare.</p>
+      <div class="links">
+        <a href="https://github.com/hr5ht/tinygptinferenceserver">Source</a>
+        <a href="https://huggingface.co/hr5ht/tinygpt-shakespeare">Model</a>
+        <a href="/docs">API</a>
       </div>
     </div>
-  </div>
+  </aside>
+  <div class="scrim" id="scrim" hidden></div>
 
-  <main class="chat" id="chat">
-    <div class="empty" id="empty">
-      <p class="eyebrow" id="play"></p>
-      <h1>You are <span id="you"></span>. <em>tinygpt</em> plays <span id="them"></span>.</h1>
-      <p>Say a line and the model answers in character. Two small GPTs trained from scratch: <b>v2</b> learned plain
-        English first, then Shakespeare's; <b>v1</b> learned Shakespeare alone, one letter at a time. Switch any time to compare.</p>
-      <div class="chips" id="chips"></div>
+  <main class="main">
+    <header class="header">
+      <button class="icon-btn" id="sidebar-toggle" aria-label="Toggle sidebar" title="Toggle sidebar" aria-controls="sidebar" aria-expanded="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+      </button>
+      <button class="btn header-new" id="header-new" aria-label="New scene" title="New scene">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        <span>New scene</span>
+      </button>
+
+      <div class="menu-wrap">
+        <button class="btn" id="model-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="model-menu">
+          <span>tinygpt <span id="model-name">v2</span></span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="menu" id="model-menu" role="menu" aria-label="Model" hidden>
+          <button class="menu-item" role="menuitemradio" data-model="v2" aria-checked="true">
+            <span><b>tinygpt v2</b><small>Word pieces. Learned plain English first, then Shakespeare.</small></span>
+            <svg class="check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </button>
+          <button class="menu-item" role="menuitemradio" data-model="v1" aria-checked="false">
+            <span><b>tinygpt v1</b><small>Letters. Learned Shakespeare alone, one character at a time.</small></span>
+            <svg class="check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="menu-wrap">
+        <button class="icon-btn" id="settings-btn" aria-label="Settings" title="Settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+        </button>
+        <div class="menu settings" id="settings" role="dialog" aria-label="Settings" hidden>
+          <div class="field">
+            <div class="field-head"><label for="temp">Temperature</label><output id="temp-value" for="temp"></output></div>
+            <input id="temp" type="range" min="0" max="1.5" step="0.1" value="0.7">
+            <p>0 always says the same thing; higher is wilder.</p>
+          </div>
+          <div class="field">
+            <div class="field-head"><label for="len">Longest reply</label><output id="len-value" for="len"></output></div>
+            <input id="len" type="range" min="40" max="120" step="10" value="100">
+            <p>Replies usually end sooner, when the speech does.</p>
+          </div>
+        </div>
+      </div>
+
+      <span class="header-title" id="scene-title"></span>
+    </header>
+
+    <div class="thread" id="thread">
+      <div class="thread-inner" id="chat">
+        <section class="greeting" id="empty">
+          <p class="eyebrow" id="play"></p>
+          <h1>You are <span id="you"></span>.</h1>
+          <p class="lead">tinygpt plays <span id="them"></span>.</p>
+          <p class="note">Say a line and the model answers in character. Switch between v2 and v1 from the menu above to compare them on the same scene.</p>
+        </section>
+      </div>
+    </div>
+
+    <div class="dock">
+      <button class="to-bottom" id="to-bottom" aria-label="Scroll to bottom" hidden>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+      </button>
+      <div class="suggestions" id="suggestions"></div>
+      <form class="composer" id="composer-form">
+        <textarea id="input" rows="2" maxlength="100" aria-label="Your line"></textarea>
+        <div class="composer-bar">
+          <span class="as-chip">as <b id="as"></b></span>
+          <span class="count"><span id="count">0</span>/100</span>
+          <button type="submit" class="send" id="send" aria-label="Send" disabled></button>
+        </div>
+      </form>
+      <p class="disclaimer">tinygpt is a small model trained from scratch. Its Shakespeare is invented.</p>
     </div>
   </main>
-
-  <div class="dock">
-    <form id="composer-form">
-      <div class="composer">
-        <span class="as" id="as"></span>
-        <textarea id="input" rows="1" maxlength="100"></textarea>
-        <button type="submit" class="send" id="send" aria-label="Send" disabled></button>
-      </div>
-      <p class="hint">
-        <span id="count">0</span>/100 ·
-        <a href="https://github.com/hr5ht/tinygptinferenceserver">Source</a> ·
-        <a href="https://huggingface.co/hr5ht/tinygpt-shakespeare">Model</a> ·
-        <a href="/docs">API</a>
-      </p>
-    </form>
-  </div>
 </div>
 </body>
 </html>
