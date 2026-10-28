@@ -30,6 +30,7 @@ curl / your code ────┘            │                                 
 model/
   model.ipynb   data prep, model, KV cache, training, benchmarks (saved T4 outputs)
   losses.csv    train/val loss every 250 steps
+  dialogue.ipynb  fine-tunes v2 for conversation (v3): dialogue data, 1024-token context, before/after eval
 server/                inference server (runs on Vercel)
   gpt.py               numpy port of the model (no torch), KV cache, batched generation; weights from the Hub
   convert.py           one-off: torch checkpoint -> shakespeare.npz
@@ -104,6 +105,18 @@ It learned the play format (speaker name, line break, dialogue), real character 
 | Apple M1 CPU | 104 tok/s | **417 tok/s** | **4.0x** |
 
 On a GPU, a model this small is limited by kernel launch overhead (~100 small kernels per token), not compute, so processing 1 token instead of up to 256 per step barely changes the time. On CPU, compute scales with the number of tokens processed, so the cache gives a 4x speedup, and the M1 CPU with the cache outruns the T4. That matters because the model is served on CPU.
+
+## Conversation fine-tune (v3)
+
+Played as a chat, both models keep the play format but barely answer what they are told. On real exchanges from the plays, Shakespeare's actual reply is only 2–3% more likely after the line it answered than after a random line. v1's 256-character context also leaves room for little more than the last line of the scene.
+
+[`model/dialogue.ipynb`](model/dialogue.ipynb) ([open in Colab](https://colab.research.google.com/github/hr5ht/tinygptinferenceserver/blob/main/model/dialogue.ipynb) → Runtime → T4 GPU → Run all) fine-tunes v2 into v3:
+- **Data:** the plays split into scenes and speeches, with stage directions dropped. Each example is a scene so far, in the chat page's format. The loss covers only one character's answers (and the blank line that ends each), so the model learns to answer rather than to continue.
+- **Context:** 256 → 1024 tokens, about 13 chat exchanges instead of 3. The new position embeddings start from v2's.
+- **Keeping v2's language:** a quarter of each batch is plain Shakespeare.
+- **Checks:** reply loss and "line gain" (real line vs random line) on held-out scenes before and after, scenes played by v2 and v3 side by side, and the export (`dialogue.npz`) loaded with the server's own `gpt.py`.
+
+The last cell uploads `dialogue.npz` to `<your account>/tinygpt-shakespeare-v3` on the Hub. To serve it, the server needs a `MODELS` entry and a per-model context check instead of the fixed `BLOCK_SIZE = 256`. The same applies to the gateway's validation and `app.js`, plus a `v3` item in the model menu.
 
 ## Inference server
 
