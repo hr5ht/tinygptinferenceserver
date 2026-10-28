@@ -108,13 +108,17 @@ On a GPU, a model this small is limited by kernel launch overhead (~100 small ke
 
 ## Conversation fine-tune (v3)
 
-Played as a chat, both models keep the play format but barely answer what they are told. On real exchanges from the plays, Shakespeare's actual reply is only 2–3% more likely after the line it answered than after a random line. v1's 256-character context also leaves room for little more than the last line of the scene.
+Played as a chat, both models keep the play format but forget the conversation and barely answer what they are told:
+- **Memory:** the chat page fits the scene into the context, which leaves v2 the last 2–3 exchanges and v1 little more than the last line.
+- **Listening:** on real exchanges from the plays, Shakespeare's actual reply is only 2–3% more likely after the line it answered than after a random line ("line gain").
 
-[`model/dialogue.ipynb`](model/dialogue.ipynb) ([open in Colab](https://colab.research.google.com/github/hr5ht/tinygptinferenceserver/blob/main/model/dialogue.ipynb) → Runtime → T4 GPU → Run all) fine-tunes v2 into v3:
-- **Data:** the plays split into scenes and speeches, with stage directions dropped. Each example is a scene so far, in the chat page's format. The loss covers only one character's answers (and the blank line that ends each), so the model learns to answer rather than to continue.
-- **Context:** 256 → 1024 tokens, about 13 chat exchanges instead of 3. The new position embeddings start from v2's.
-- **Keeping v2's language:** a quarter of each batch is plain Shakespeare.
-- **Checks:** reply loss and "line gain" (real line vs random line) on held-out scenes before and after, scenes played by v2 and v3 side by side, and the export (`dialogue.npz`) loaded with the server's own `gpt.py`.
+[`model/dialogue.ipynb`](model/dialogue.ipynb) ([open in Colab](https://colab.research.google.com/github/hr5ht/tinygptinferenceserver/blob/main/model/dialogue.ipynb) → Runtime → T4 GPU → Run all) fine-tunes v2 into v3 for the first problem:
+- **Context:** 256 → 1024 tokens, about 13 chat exchanges instead of 3. The new position embeddings start from v2's and learn 10x faster than the rest.
+- **Data:** the plays split into scenes and speeches, with stage directions dropped. Each example is a scene so far, in the chat page's format, with the loss only on one character's answers (and the blank line that ends each).
+- **Keeping v2's language:** a quarter of each batch is plain Shakespeare, and the learning rate is low (5e-5). In trial runs, 3e-4 or switching on dropout made the answers worse.
+- **Checks:** answer loss and line gain on held-out scenes before and after, scenes played by v2 and v3 side by side, and the export (`dialogue.npz`) loaded with the server's own `gpt.py`. The run fails unless v3's answers beat v2's as served today.
+
+Line gain barely moves with a fine-tune, because the answers were already in v2's training text. Making the model listen needs a bigger model.
 
 The last cell uploads `dialogue.npz` to `<your account>/tinygpt-shakespeare-v3` on the Hub. To serve it, the server needs a `MODELS` entry and a per-model context check instead of the fixed `BLOCK_SIZE = 256`. The same applies to the gateway's validation and `app.js`, plus a `v3` item in the model menu.
 
