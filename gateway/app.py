@@ -22,7 +22,8 @@ ANON_PER_MIN = int(os.environ.get("ANON_PER_MIN", 10))  # per IP, no key (the we
 KEY_PER_MIN = int(os.environ.get("KEY_PER_MIN", 60))  # per API key
 CACHE_TTL_S = 24 * 3600
 
-BLOCK_SIZE = 256  # the model's context: prompt + generated text must fit
+V1_CONTEXT = 256  # v1's context in characters: prompt + generated text must fit
+MAX_CONTEXT = 1024  # the longest context of any model (v3), in tokens
 
 log = logging.getLogger("uvicorn.error")
 
@@ -53,19 +54,19 @@ app.add_middleware(
 
 class GenerateRequest(BaseModel):
     # same limits as the server, so bad input never costs an upstream call. v1's tokens are characters,
-    # so its context is checked here; v2's word pieces are counted by the server, which has the tokenizer
+    # so its context is checked here; word pieces (v2, v3) are counted by the server, which has the tokenizer
     prompt: str = Field(min_length=1, max_length=4000)
-    max_tokens: int = Field(100, ge=1, le=BLOCK_SIZE - 1)
+    max_tokens: int = Field(100, ge=1, le=MAX_CONTEXT - 1)
     temperature: float = Field(0.8, ge=0, le=2)
     top_k: int | None = Field(50, ge=1)
     top_p: float | None = Field(None, gt=0, le=1)
     stream: bool = False
-    model: Literal["v1", "v2"] = "v1"
+    model: Literal["v1", "v2", "v3"] = "v1"
 
     @model_validator(mode="after")
     def fits_context(self):
-        if self.model == "v1" and len(self.prompt) + self.max_tokens > BLOCK_SIZE:
-            raise ValueError(f"prompt length + max_tokens must be at most {BLOCK_SIZE}")
+        if self.model == "v1" and len(self.prompt) + self.max_tokens > V1_CONTEXT:
+            raise ValueError(f"prompt length + max_tokens must be at most {V1_CONTEXT} for v1")
         return self
 
 

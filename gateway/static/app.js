@@ -2,13 +2,17 @@
 // in the play format it was trained on ("ROMEO.\n<speech>\n\n"), ending with the name of the
 // character whose turn it is, and the model writes that character's speech.
 
-const BLOCK_SIZE = 256; // both models' context in tokens: prompt + reply
-const MAX_INPUT = 100; // MAX_INPUT + two names + the longest reply (120 chars) fits either model
+// how much of the scene each turn sends, in tokens: prompt + reply. v1 and v2 hold 256; v3 holds 1024 but answers
+// best with 256 (held-out loss 1.231 at 256 up to 1.240 at 1024), and a turn is ~4x faster on the server's CPU
+const BLOCK_SIZE = 256;
+const MAX_INPUT = 100; // MAX_INPUT + two names + the longest reply (120 chars) fits every model
 
 // v1 reads letters (1 char per token); v2 reads word pieces (~3.3 chars per token on this text; 2.5 leaves margin).
 // v1 spells best close to its likeliest letters: at 0.8 / top-k 50 it drifts into made-up words, at 0.5 / 20
-// it writes real lines. v2 already knows its words, so it can afford more variety.
+// it writes real lines. v2 already knows its words, so it can afford more variety; v3 (v2's word pieces in a
+// bigger model) uses the same settings.
 const MODELS = {
+  v3: { charsPerToken: 2.5, temperature: 0.7, topK: 40 },
   v2: { charsPerToken: 2.5, temperature: 0.7, topK: 40 },
   v1: { charsPerToken: 1, temperature: 0.5, topK: 20 },
 };
@@ -74,7 +78,7 @@ const convos = SCENES.map(newConvo);
 let sceneIdx = 0;
 let scene = SCENES[0];
 let convo = convos[0];
-let model = "v2";
+let model = "v3";
 let ctrl = null; // the request in flight
 let stick = true; // follow the reply as it streams, unless the reader has scrolled up
 
@@ -433,6 +437,6 @@ $("send").onclick = (e) => {
   }
 };
 
-setModel("v2");
+setModel("v3");
 showScene(0);
 setBusy(false);

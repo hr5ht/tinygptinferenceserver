@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tinygpt</title>
-<meta name="description" content="Play a scene with a 10.77M-parameter GPT trained from scratch on Shakespeare.">
+<meta name="description" content="Play a scene with small GPTs trained from scratch on Shakespeare.">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#09090b">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
@@ -31,10 +31,10 @@
       <ul id="scene-list"></ul>
     </nav>
     <div class="sidebar-foot">
-      <p>10.77M parameters, trained from scratch on the complete works of Shakespeare.</p>
+      <p>Small GPTs trained from scratch on Shakespeare. v3, the default, has 28M parameters.</p>
       <div class="links">
         <a href="https://github.com/hr5ht/tinygptinferenceserver">Source</a>
-        <a href="https://huggingface.co/hr5ht/tinygpt-shakespeare">Model</a>
+        <a href="https://huggingface.co/hr5ht/tinygpt-shakespeare-v3">Model</a>
         <a href="/docs">API</a>
       </div>
     </div>
@@ -53,11 +53,15 @@
 
       <div class="menu-wrap">
         <button class="btn" id="model-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="model-menu">
-          <span>tinygpt <span id="model-name">v2</span></span>
+          <span>tinygpt <span id="model-name">v3</span></span>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
         </button>
         <div class="menu" id="model-menu" role="menu" aria-label="Model" hidden>
-          <button class="menu-item" role="menuitemradio" data-model="v2" aria-checked="true">
+          <button class="menu-item" role="menuitemradio" data-model="v3" aria-checked="true">
+            <span><b>tinygpt v3</b><small>Word pieces, 28M params. Simple English, then Shakespeare and its dialogue.</small></span>
+            <svg class="check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </button>
+          <button class="menu-item" role="menuitemradio" data-model="v2" aria-checked="false">
             <span><b>tinygpt v2</b><small>Word pieces. Learned plain English first, then Shakespeare.</small></span>
             <svg class="check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
           </button>
@@ -95,7 +99,7 @@
           <p class="eyebrow" id="play"></p>
           <h1>You are <span id="you"></span>.</h1>
           <p class="lead">tinygpt plays <span id="them"></span>.</p>
-          <p class="note">Say a line and the model answers in character. Switch between v2 and v1 from the menu above to compare them on the same scene.</p>
+          <p class="note">Say a line and the model answers in character. Switch models from the menu above to compare them on the same scene.</p>
         </section>
       </div>
     </div>

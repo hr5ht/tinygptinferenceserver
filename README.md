@@ -115,13 +115,21 @@ Played as a chat, v1 and v2 keep the play format but barely answer what they are
 - **Data:** ~200M tokens over 6000 steps. Most of the run is TinyStories for plain English, with 5% Shakespeare. The last 15%, while the learning rate winds down, is half Shakespeare, and half of that is dialogue in the chat page's format with the loss on the answers only. It uses v2's tokenizer, so the server needs no new one.
 - **Running it:** on Kaggle, import the notebook, then set Accelerator → GPU T4 x2 and Internet → on, and add a Hugging Face write token as the secret `HF_TOKEN`. Then Save Version → Save & Run All. Each step is split across both GPUs, and the first eval line prints the speed and the time left. `v3.npz`, `v3.pt`, `ckpt.pt` and `losses.csv` land in the Output tab, and the last cell uploads all but the checkpoint to `<your account>/tinygpt-shakespeare-v3`. To continue a run that stopped, add its output as an input and run again: training resumes from `ckpt.pt`.
 
-To serve it, the server needs a `MODELS` entry and a per-model context check instead of the fixed `BLOCK_SIZE = 256`. The same goes for the gateway's validation and `app.js` (a prompt budget per model), plus a `v3` item in the model menu.
+Served as `v3`, the chat's default. On 300 held-out scenes it answers better than v2:
+
+| | v2 | v3 |
+|---|---|---|
+| answer loss, each as served (nats/char) | 1.263 | **1.240** |
+| answer loss, same 256 tokens | 1.263 | **1.231** |
+| line gain | 2.2% | **2.7%** |
+
+Its longer context doesn't pay off yet: answer loss rises from 1.231 with 256 tokens of the scene to 1.240 with 1024. So the chat page sends it 256 tokens, like v2, which also keeps a turn ~4x faster on the server's CPU.
 
 ## Inference server
 
 [`server/`](server/) serves the model over HTTP with FastAPI on Vercel. torch is 715 MB unzipped on Linux, over Vercel's 500 MB function limit, so `gpt.py` reimplements inference in numpy (57 MB). [`convert.py`](server/convert.py) turns the torch checkpoint into `shakespeare.npz` on the Hub. The numpy logits match torch to within 1e-5, and greedy outputs are identical.
 
-- `POST /v1/generate` takes `{"prompt", "max_tokens", "temperature", "top_k", "top_p", "stream"}` and returns `{"text", "tokens"}`, or server-sent events with one token each when `stream` is true.
+- `POST /v1/generate` takes `{"prompt", "max_tokens", "temperature", "top_k", "top_p", "stream", "model"}` (`"v1"` by default, `"v2"` or `"v3"`) and returns `{"text", "tokens"}`, or server-sent events with one token each when `stream` is true.
 - **Dynamic batching:** requests wait in a bounded queue. A worker thread takes the first request, waits up to 20 ms for up to 8 more, and generates them as one batch: left-padded prompts, per-row positions and an attention mask over the padding, with the KV cache shared across the batch. A row leaves the batch as soon as it finishes or its client disconnects.
 - **Back-pressure:**
   - a full queue returns `503` with `Retry-After`;

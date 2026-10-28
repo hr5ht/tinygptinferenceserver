@@ -22,12 +22,14 @@ MAX_QUEUE = int(os.environ.get("MAX_QUEUE", 64))
 TIMEOUT_S = float(os.environ.get("TIMEOUT_S", 60))
 
 # name -> (Hugging Face repo, weights file). v1: 97 characters; v2: 4096 word pieces, English from TinyStories
-# with Shakespeare-era English on top (model/stories.ipynb). Both have a 256-token context.
+# with Shakespeare-era English on top (model/stories.ipynb); both 256 tokens of context. v3: v2's word pieces,
+# 27.8M params, 1024 tokens of context (model/v3.ipynb). Each model's context comes from its config.
 MODELS = {
     "v1": ("hr5ht/tinygpt-shakespeare", "shakespeare.npz"),
     "v2": ("hr5ht/tinygpt-shakespeare-v2", "stories.npz"),
+    "v3": ("hr5ht/tinygpt-shakespeare-v3", "v3.npz"),
 }
-BLOCK_SIZE = 256
+MAX_CONTEXT = 1024  # the longest context of any model above
 
 LATENCY = Histogram("generate_latency_seconds", "Request received to last token sent", ["model"])
 
@@ -38,7 +40,7 @@ async def lifespan(app):
     app.state.models = {}
     for name, (repo, filename) in MODELS.items():
         model, tok = load(repo, filename)
-        assert model.cfg.block_size == BLOCK_SIZE
+        assert model.cfg.block_size <= MAX_CONTEXT
         batcher = Batcher(model, MAX_BATCH, MAX_WAIT_MS, MAX_QUEUE, name)
         batcher.start()
         app.state.models[name] = tok, batcher
@@ -57,12 +59,12 @@ def check_token(authorization: str = Header("")):
 
 class GenerateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)  # the real limit is in tokens, checked per model below
-    max_tokens: int = Field(100, ge=1, le=BLOCK_SIZE - 1)
+    max_tokens: int = Field(100, ge=1, le=MAX_CONTEXT - 1)  # also checked against the model's own context below
     temperature: float = Field(0.8, ge=0, le=2)
     top_k: int | None = Field(50, ge=1)
     top_p: float | None = Field(None, gt=0, le=1)
     stream: bool = False
-    model: Literal["v1", "v2"] = "v1"
+    model: Literal["v1", "v2", "v3"] = "v1"
 
 
 @app.get("/health")
@@ -81,8 +83,9 @@ async def generate(body: GenerateRequest, request: Request):
     if unknown := tok.unknown(body.prompt):
         raise HTTPException(422, f"characters the model has never seen: {''.join(unknown)!r}")
     ids = tok.encode(body.prompt)
-    if len(ids) + body.max_tokens > BLOCK_SIZE:
-        raise HTTPException(422, f"prompt ({len(ids)} tokens) + max_tokens must be at most {BLOCK_SIZE}")
+    context = batcher.model.cfg.block_size
+    if len(ids) + body.max_tokens > context:
+        raise HTTPException(422, f"prompt ({len(ids)} tokens) + max_tokens must be at most {context} for {body.model}")
 
     loop = asyncio.get_running_loop()
     sampling = {"temperature": body.temperature, "top_k": body.top_k, "top_p": body.top_p}
