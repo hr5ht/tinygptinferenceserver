@@ -30,7 +30,7 @@ curl / your code ────┘            │                                 
 model/
   model.ipynb   data prep, model, KV cache, training, benchmarks (saved T4 outputs)
   losses.csv    train/val loss every 250 steps
-  dialogue.ipynb  fine-tunes v2 for conversation (v3): dialogue data, 1024-token context, before/after eval
+  dialogue.ipynb  fine-tunes v2 for conversation (v3): dialogue data, 512-token context, before/after eval
 server/                inference server (runs on Vercel)
   gpt.py               numpy port of the model (no torch), KV cache, batched generation; weights from the Hub
   convert.py           one-off: torch checkpoint -> shakespeare.npz
@@ -113,10 +113,10 @@ Played as a chat, both models keep the play format but forget the conversation a
 - **Listening:** on real exchanges from the plays, Shakespeare's actual reply is only 2–3% more likely after the line it answered than after a random line ("line gain").
 
 [`model/dialogue.ipynb`](model/dialogue.ipynb) ([open in Colab](https://colab.research.google.com/github/hr5ht/tinygptinferenceserver/blob/main/model/dialogue.ipynb) → Runtime → T4 GPU → Run all) fine-tunes v2 into v3 for the first problem:
-- **Context:** 256 → 1024 tokens, about 13 chat exchanges instead of 3. The new position embeddings start from v2's and learn 10x faster than the rest.
+- **Context:** 256 → 512 tokens, 6–7 chat exchanges instead of 3. v2's position embeddings stay frozen; the new ones start from copies of them and learn at 2e-3. In trial runs, going to 1024 took far longer to pay off than a short fine-tune allows.
 - **Data:** the plays split into scenes and speeches, with stage directions dropped. Each example is a scene so far, in the chat page's format, with the loss only on one character's answers (and the blank line that ends each).
-- **Keeping v2's language:** a quarter of each batch is plain Shakespeare, and the learning rate is low (5e-5). In trial runs, 3e-4 or switching on dropout made the answers worse.
-- **Checks:** answer loss and line gain on held-out scenes before and after, scenes played by v2 and v3 side by side, and the export (`dialogue.npz`) loaded with the server's own `gpt.py`. The run fails unless v3's answers beat v2's as served today.
+- **Keeping v2's language:** a quarter of each batch is plain Shakespeare, and v2's weights move slowly (5e-5). In trial runs, 3e-4, switching on dropout, or letting v2's own position embeddings move made the answers worse.
+- **Checks:** answer loss and line gain on held-out scenes before and after, scenes played by v2 and v3 side by side, and the export (`dialogue.npz`) loaded with the server's own `gpt.py`. The run fails unless v3 with 512 tokens answers better than v2 with the chat page's 256, and no worse with the same 256.
 
 Line gain barely moves with a fine-tune, because the answers were already in v2's training text. Making the model listen needs a bigger model.
 
