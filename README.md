@@ -30,7 +30,7 @@ curl / your code ────┘            │                                 
 model/
   model.ipynb   data prep, model, KV cache, training, benchmarks (saved T4 outputs)
   losses.csv    train/val loss every 250 steps
-  v3.ipynb      v3: 27.8M params from scratch (TinyStories, Shakespeare, dialogue), sized for Vercel's free plan
+  v3.ipynb      v3: 27.8M params from scratch on Kaggle (TinyStories, Shakespeare, dialogue), sized for Vercel's free plan
 server/                inference server (runs on Vercel)
   gpt.py               numpy port of the model (no torch), KV cache, batched generation; weights from the Hub
   convert.py           one-off: torch checkpoint -> shakespeare.npz
@@ -110,13 +110,12 @@ On a GPU, a model this small is limited by kernel launch overhead (~100 small ke
 
 Played as a chat, v1 and v2 keep the play format but barely answer what they are told. On real exchanges from the plays, Shakespeare's actual reply is only 2–3% more likely after the line it answered than after a random line. Fine-tuning v2 on dialogue didn't change that: in trial runs its answers got no better and that gap stayed flat, because those answers were already in its training text. The chat page also fits the scene into the context, which leaves v2 only the last 2–3 exchanges.
 
-[`model/v3.ipynb`](model/v3.ipynb) ([open in Colab](https://colab.research.google.com/github/hr5ht/tinygptinferenceserver/blob/main/model/v3.ipynb) → Runtime → T4 GPU → Run all) trains v3 from scratch:
+[`model/v3.ipynb`](model/v3.ipynb) trains v3 from scratch on Kaggle and uploads it to the Hub:
 - **Size, for Vercel's free plan** (1 vCPU, 2 GB): 8 layers × 512, 27.8M params (111 MB), 1024-token context. With the server's numpy code on one thread, a chat turn at full context takes ~3.4 s (v2: 0.7 s), and 8 at once take ~43 s, inside the server's 60 s timeout. Bigger costs more than it adds: 10 × 512 is ~10% slower, 12 × 640 ~1.8×.
 - **Data:** ~200M tokens over 6000 steps. Most of the run is TinyStories for plain English, with 5% Shakespeare. The last 15%, while the learning rate winds down, is half Shakespeare, and half of that is dialogue in the chat page's format with the loss on the answers only. It uses v2's tokenizer, so the server needs no new one.
-- **Free Colab:** with Google Drive mounted, it caches the prepared data and saves a checkpoint every 500 steps; after a disconnect, Run all resumes. The first eval line prints the measured speed and the time left.
-- **Checks:** v3 against v2 on held-out scenes (answers as served, answers with the same 256 tokens, and line gain), the two playing the same scenes, and the export (`v3.npz`) loaded with the server's own `gpt.py`. The run stops before the upload unless v3 answers better than v2.
+- **Running it:** on Kaggle, import the notebook, then set Accelerator → GPU T4 x2 and Internet → on, and add a Hugging Face write token as the secret `HF_TOKEN`. Then Save Version → Save & Run All. Each step is split across both GPUs, and the first eval line prints the speed and the time left. `v3.npz`, `v3.pt`, `ckpt.pt` and `losses.csv` land in the Output tab, and the last cell uploads all but the checkpoint to `<your account>/tinygpt-shakespeare-v3`. To continue a run that stopped, add its output as an input and run again: training resumes from `ckpt.pt`.
 
-The last cell uploads `v3.npz` to `<your account>/tinygpt-shakespeare-v3` on the Hub. To serve it, the server needs a `MODELS` entry and a per-model context check instead of the fixed `BLOCK_SIZE = 256`. The same goes for the gateway's validation and `app.js` (a prompt budget per model), plus a `v3` item in the model menu.
+To serve it, the server needs a `MODELS` entry and a per-model context check instead of the fixed `BLOCK_SIZE = 256`. The same goes for the gateway's validation and `app.js` (a prompt budget per model), plus a `v3` item in the model menu.
 
 ## Inference server
 
